@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LocalThermo</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="bar">
+    <h1>LocalThermo <span class="sub">BlueDOT reader</span></h1>
+    <div class="bar-actions">
+      <span id="status" class="status" data-state="idle"><span class="dot" aria-hidden="true"></span><span id="statusText">Not connected</span></span>
+      <button id="connectBtn" class="primary">Connect</button>
+      <button id="demoBtn" title="Run with simulated readings, no thermometer needed">Demo</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden role="alert">
+    <span id="bannerText"></span>
+    <button id="ackBtn">Silence</button>
+  </div>
+  <div id="notice" class="notice" hidden></div>
+
+  <main>
+    <section class="tiles">
+      <div class="tile hero">
+        <div class="label">Probe temperature</div>
+        <div class="value"><span id="temp">--</span><span id="tempUnit" class="unit"></span></div>
+        <div id="tempNote" class="note">Waiting for a reading</div>
+      </div>
+      <div class="tile">
+        <div class="label">Rate of change</div>
+        <div class="value small" id="rate">--</div>
+        <div class="note" id="eta">over the last 5 minutes</div>
+      </div>
+      <div class="tile">
+        <div class="label">Session low / high</div>
+        <div class="value small" id="minmax">--</div>
+        <div class="note" id="elapsed">No readings yet</div>
+      </div>
+      <div class="tile">
+        <div class="label">Alarm set on the BlueDOT</div>
+        <div class="value small" id="devAlarm">--</div>
+        <div class="note" id="devAlarmNote">Read from the device</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>Temperature over time</h2>
+        <div class="seg" role="group" aria-label="Time range">
+          <button data-range="15">15 min</button>
+          <button data-range="60">1 hour</button>
+          <button data-range="0" class="on">All</button>
+        </div>
+      </div>
+      <div id="chartWrap" class="chart-wrap">
+        <svg id="chart" role="img" aria-label="Line chart of probe temperature over time"></svg>
+        <div id="tip" class="tip" hidden></div>
+        <div id="chartEmpty" class="empty">Readings will be plotted here once the thermometer is connected.</div>
+      </div>
+      <details class="table-view">
+        <summary>Show readings as a table</summary>
+        <div class="table-scroll"><table>
+          <thead><tr><th>Time</th><th id="thTemp">Temperature</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table></div>
+        <p class="note">Most recent 100 logged readings. Download the CSV for all of them.</p>
+      </details>
+    </section>
+
+    <div class="grid2">
+      <section class="card">
+        <h2>Alerts</h2>
+        <p class="note">Set here in the app; they do not change the alarm on the thermometer itself.</p>
+        <label class="row"><input type="checkbox" id="highOn"> <span>Alert at or above</span>
+          <input type="number" id="highVal" inputmode="decimal" step="1"> <span class="u"></span></label>
+        <label class="row"><input type="checkbox" id="lowOn"> <span>Alert at or below</span>
+          <input type="number" id="lowVal" inputmode="decimal" step="1"> <span class="u"></span></label>
+        <label class="row"><input type="checkbox" id="soundOn" checked> <span>Play a sound</span></label>
+        <div class="row">
+          <button id="notifyBtn">Enable desktop notifications</button>
+          <button id="testAlertBtn">Test alert</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Log</h2>
+        <label class="row"><span>Display unit</span>
+          <select id="unitSel"><option value="auto">Same as thermometer</option><option value="F">°F</option><option value="C">°C</option></select></label>
+        <label class="row"><span>Record a reading every</span>
+          <select id="intervalSel"><option value="1">1 second</option><option value="5">5 seconds</option><option value="15">15 seconds</option><option value="60">1 minute</option></select></label>
+        <div class="row">
+          <button id="csvBtn">Download CSV</button>
+          <button id="fileBtn" hidden>Log continuously to a file…</button>
+          <button id="clearBtn">New session</button>
+        </div>
+        <p class="note" id="logNote"></p>
+      </section>
+    </div>
+
+    <section class="card">
+      <details id="setup">
+        <summary><h2>Bluetooth setup and diagnostics</h2></summary>
+        <p>Browsers only let a page use Bluetooth services it names in advance, and the BlueDOT's service UUID is not
+          published. Find it once and paste it here:</p>
+        <ol>
+          <li>In Chrome or Edge open <code>chrome://bluetooth-internals/#devices</code> and press <b>Start Scan</b>.</li>
+          <li>Find <b>BlueDOT</b><span id="macHint"></span> and press <b>Inspect</b>.</li>
+          <li>Copy everything under <b>Services</b> (or the whole page) and paste it below. Extra text is ignored.</li>
+        </ol>
+        <p class="note">The free nRF Connect phone app shows the same list. Or run <code>python3 tools/discover.py</code> from this project.</p>
+        <label for="svcText">Service UUIDs</label>
+        <textarea id="svcText" rows="3" spellcheck="false" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></textarea>
+        <label class="row"><span>Expected device address</span>
+          <input type="text" id="macVal" spellcheck="false" placeholder="00:a0:50:42:a1:d8"></label>
+        <label class="row"><input type="checkbox" id="allDevices"> <span>List every nearby Bluetooth device when connecting (use if BlueDOT is not offered)</span></label>
+        <div class="row"><button id="saveSetupBtn" class="primary">Save</button><span id="setupSaved" class="note"></span></div>
+        <h3>Diagnostics</h3>
+        <p class="note">What the page saw on the last connection, and the latest raw frames. Useful if the readings look wrong.</p>
+        <pre id="diag">Nothing yet.</pre>
+        <div class="row"><button id="copyDiagBtn">Copy diagnostics</button></div>
+      </details>
+    </section>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
