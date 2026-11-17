@@ -2,7 +2,8 @@
 
 A web page that reads a ThermoWorks BlueDOT thermometer directly over Bluetooth
 (Web Bluetooth), with a live readout, a temperature chart, alerts and CSV logging.
-Nothing leaves your computer: there is no server side and no account.
+An optional hub server lets a phone or other device on your network watch along.
+Nothing leaves your network, and there is no account.
 
 ## Run it
 
