@@ -261,6 +261,7 @@ async function pushToHub(force) {
 }
 
 let viewSession = '';
+let hubDemo = false;
 
 async function pollHub() {
   try {
@@ -272,10 +273,11 @@ async function pollHub() {
       tripped.high = tripped.low = false;
     }
     for (const [t, v, u] of s.rows) rows.push({ t, v, u });
+    hubDemo = Boolean(s.demo);
     latest = s.latest;
     lastFrameAt = s.age == null ? 0 : Date.now() - s.age;
     if (s.hubAge == null || s.hubAge > 15000) {
-      setStatus('error', 'Hub page is not reporting. Open it in Chrome on the hub computer.');
+      setStatus('error', 'Hub page is not reporting. Open it in Chrome or Edge on the hub computer.');
     } else {
       setStatus(s.status.state, s.status.text);
       if (latest && s.age < 30000) checkAlerts(latest);
@@ -405,11 +407,11 @@ addEventListener('pointerdown', primeAudio, { once: true }); // phones only allo
 
 function renderLogNote() {
   const where = fileHandle ? `Appending to ${fileHandle.name} every 15 seconds. ` : '';
-  const kept = demo ? ' (demo, not saved)'
-    : mode === 'viewer' ? ', relayed from the hub'
+  const kept = demo || hubDemo ? ' (demo, not saved)'
+    : mode === 'viewer' ? ', from the hub (also saved there as CSV in its logs folder)'
     : mode === 'hub' ? ', also saved as CSV in the logs folder next to server.py'
     : ', kept in this browser until you start a new session';
-  $('logNote').textContent = `${where}${rows.length} readings in this session${kept}.`;
+  $('logNote').textContent = `${where}${rows.length} reading${rows.length === 1 ? '' : 's'} in this session${kept}.`;
 }
 
 // ---------------------------------------------------------------- rendering
@@ -696,8 +698,13 @@ $('ackBtn').addEventListener('click', silence);
 $('csvBtn').addEventListener('click', downloadCsv);
 $('fileBtn').hidden = !window.showSaveFilePicker;
 $('fileBtn').addEventListener('click', pickLogFile);
-$('clearBtn').addEventListener('click', () => {
+$('clearBtn').addEventListener('click', async () => {
   if (rows.length && !confirm('Start a new session? This clears the readings shown here. Download the CSV first if you want to keep them.')) return;
+  if (mode === 'viewer') {
+    await fetch('api/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
+    pollHub();
+    return;
+  }
   rows = [];
   hubReset = true;
   lastLoggedAt = 0;
@@ -753,11 +760,18 @@ async function init() {
     if (res.ok) hub = await res.json();
   } catch { /* plain static hosting: no relay */ }
   const params = new URLSearchParams(location.search);
-  if (hub) mode = hub.local && !params.has('view') ? 'hub' : 'viewer';
+  // The hub reads the thermometer itself unless it was started with --browser-bluetooth.
+  const serverReads = hub?.source === 'server';
+  if (hub) mode = serverReads || !hub.local || params.has('view') ? 'viewer' : 'hub';
+  $('notifyBtn').hidden = !window.isSecureContext || !window.Notification;
 
   if (mode === 'viewer') {
     document.body.classList.add('viewer');
-    $('hubInfo').textContent = 'Showing readings relayed from the hub computer. Alerts set here sound on this device only, and only while this page is open on screen.';
+    const local = serverReads && hub.local;
+    $('clearBtn').hidden = !local; // only the hub computer may start a new session
+    $('hubInfo').textContent = local
+      ? `This computer is reading the BlueDOT. On your phone or another device on this network, open http://${hub.lan || '<this computer>'}:${hub.port}`
+      : 'Showing readings from the hub computer. Alerts set here sound on this device only, and only while this page is open on screen.';
     $('hubInfo').hidden = false;
     render();
     pollHub();

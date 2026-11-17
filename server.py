@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
-"""LocalThermo hub: serves the app and relays readings to other devices on your network.
+"""LocalThermo hub: reads a ThermoWorks BlueDOT and shows it to any browser on your network.
 
-    python3 server.py            # then open http://localhost:8000 in Chrome on this computer
-    python3 server.py --port 9000
+    pip install bleak
+    python3 server.py                               # find a BlueDOT by name
+    python3 server.py --address 00:a0:50:42:a1:d8   # insist on one particular BlueDOT
+    python3 server.py --demo                        # simulated readings, no thermometer
 
-The Chrome page on this computer talks to the BlueDOT and pushes readings here.
-Any other device on the network can open http://<this computer>:8000 to watch them.
-Only this computer may push; other devices can only read. Standard library only.
+This program talks to the thermometer itself, so any browser works as a display:
+http://localhost:8000 on this computer, http://<this computer>:8000 elsewhere.
+
+    python3 server.py --browser-bluetooth
+
+skips that and lets the Chrome/Edge page on this computer do the Bluetooth instead
+(Web Bluetooth), relaying its readings through this server. Needs no bleak.
 """
 import argparse
+import asyncio
 import json
+import math
 import os
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -44,7 +53,89 @@ state = {
     "pushed_at": None,   # when the hub page last checked in
     "log": None,         # open CSV file for this session
     "port": 8000,
+    "source": "browser",  # "server": this program reads the thermometer; "browser": the hub page does
+    "demo": False,
+    "interval": 5.0,      # seconds between logged readings
+    "logged_at": 0,
 }
+
+NAME_PREFIX = "BlueDOT"
+UPDATES_UUID = "783f2991-23e0-4bdc-ac16-78601bd84b39"
+
+
+def decode_frame(data):
+    """Decode the 20-byte status frame. Layout and sources are documented in bluedot.js."""
+    if len(data) != 20:
+        return None
+    connected = data[0] == 0
+    temp, alarm = struct.unpack_from("<ii", data, 1)
+    return {
+        "probeConnected": connected,
+        "temp": temp if connected else None,
+        "alarmTemp": alarm,
+        "alarmSilenced": data[9] != 0,
+        "alarmDisabled": data[10] != 0,
+        "unit": "F" if data[11] == 1 else "C",
+        "mac": ":".join(f"{b:02x}" for b in data[13:19]),
+        "alarmActive": data[19] != 0,
+    }
+
+
+def encode_frame(temp, alarm=203, unit="F", mac="00:a0:50:00:00:00"):
+    return struct.pack("<Bii3B", 0, round(temp), alarm, 0, 0, 1 if unit == "F" else 0) + b"\0" + bytes.fromhex(mac.replace(":", "")) + b"\0"
+
+
+def normalize_mac(text):
+    digits = "".join(c for c in (text or "").lower() if c in "0123456789abcdef")
+    return ":".join(digits[i:i + 2] for i in range(0, 12, 2)) if len(digits) == 12 else ""
+
+
+def set_status(kind, text):
+    with lock:
+        changed = state["status"]["text"] != text
+        state["status"] = {"state": kind, "text": text}
+    if changed:
+        print(f"[{datetime.now():%H:%M:%S}] {text}")
+
+
+def record_frame(data, t=None):
+    """Take one frame from the thermometer; log a row if the interval has passed."""
+    frame = decode_frame(data)
+    if frame is None:
+        return None
+    t = t or now_ms()
+    with lock:
+        state["latest"] = frame
+        state["frame_at"] = t
+        if t - state["logged_at"] >= state["interval"] * 1000 - 200:
+            state["logged_at"] = t
+            add_rows([[t, frame["temp"], frame["unit"]]])
+    return frame
+
+
+def mark_gap():
+    """Break the chart line where the connection dropped."""
+    with lock:
+        if state["rows"] and state["rows"][-1][1] is not None:
+            add_rows([[now_ms(), None, state["rows"][-1][2]]])
+
+
+def add_rows(rows):
+    """Caller holds the lock."""
+    state["rows"].extend(rows)
+    del state["rows"][:-MAX_ROWS]
+    if not state["demo"]:
+        log_rows(rows)
+
+
+def new_session():
+    """Caller holds the lock."""
+    state["session"] = now_ms()
+    state["rows"] = []
+    state["logged_at"] = 0
+    if state["log"]:
+        state["log"].close()
+        state["log"] = None
 
 
 def now_ms():
@@ -143,7 +234,10 @@ class Handler(BaseHTTPRequestHandler):
                 "status": state["status"],
                 "latest": state["latest"],
                 "age": None if state["frame_at"] is None else now - state["frame_at"],
-                "hubAge": None if state["pushed_at"] is None else now - state["pushed_at"],
+                "hubAge": 0 if state["source"] == "server"
+                else None if state["pushed_at"] is None else now - state["pushed_at"],
+                "source": state["source"],
+                "demo": state["demo"],
                 "rows": rows,
                 "local": self.client_address[0] in LOOPBACK,
                 "lan": lan_address(),
@@ -152,14 +246,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(payload)
 
     def do_POST(self):
-        if urlparse(self.path).path != "/api/push":
+        path = urlparse(self.path).path
+        if path not in ("/api/push", "/api/reset"):
             return self.send_error(404)
-        # Readings may only come from the page running on this computer. Requiring a JSON
-        # content type also stops other websites from posting here through the browser.
+        # Changes may only come from this computer. Requiring a JSON content type also
+        # stops other websites from posting here through the browser.
         if self.client_address[0] not in LOOPBACK:
-            return self.send_json({"error": "only the hub computer may push"}, 403)
+            return self.send_json({"error": "only the hub computer may do this"}, 403)
         if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
             return self.send_json({"error": "expected application/json"}, 415)
+        if path == "/api/reset":
+            with lock:
+                new_session()
+            return self.send_json({"ok": True})
+        if state["source"] != "browser":
+            return self.send_json({"error": "this hub reads the thermometer itself"}, 409)
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if not 0 < length <= MAX_BODY:
@@ -174,16 +275,11 @@ class Handler(BaseHTTPRequestHandler):
         with lock:
             state["pushed_at"] = now_ms()
             if data.get("reset"):
-                state["session"] = now_ms()
-                state["rows"] = []
-                if state["log"]:
-                    state["log"].close()
-                    state["log"] = None
+                new_session()
             if data.get("from") != len(state["rows"]):
                 # The page and the hub disagree (for example the hub was restarted).
                 return self.send_json({"resync": True})
-            state["rows"].extend(rows)
-            del state["rows"][:-MAX_ROWS]
+            state["demo"] = bool(data.get("demo"))
             if isinstance(data.get("status"), dict):
                 state["status"] = {
                     "state": str(data["status"].get("state", "idle"))[:20],
@@ -192,8 +288,8 @@ class Handler(BaseHTTPRequestHandler):
             state["latest"] = data.get("latest") if isinstance(data.get("latest"), dict) else None
             frame_at = data.get("lastFrameAt")
             state["frame_at"] = frame_at if isinstance(frame_at, (int, float)) and frame_at > 0 else None
-            if rows and not data.get("demo"):
-                log_rows(rows)
+            if rows:
+                add_rows(rows)
             count = len(state["rows"])
         self.send_json({"count": count})
 
@@ -202,12 +298,112 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
 
 
+async def bluetooth_loop(expected_mac):
+    """Find the BlueDOT, stay subscribed to it, and reconnect whenever the link drops."""
+    from bleak import BleakClient, BleakScanner
+
+    loop = asyncio.get_running_loop()
+    rejected = set()   # BlueDOTs that turned out to be a different unit
+    by_address = bool(expected_mac) and sys.platform != "darwin"  # macOS hides real addresses
+
+    def wanted(device, adv):
+        if device.address in rejected:
+            return False
+        if by_address and device.address.lower() == expected_mac:
+            return True
+        return (device.name or adv.local_name or "").startswith(NAME_PREFIX)
+
+    while True:
+        set_status("busy", "Looking for the BlueDOT")
+        problem = None
+        try:
+            device = await BleakScanner.find_device_by_filter(wanted, timeout=15)
+            if device is None:
+                set_status("busy", "Looking for the BlueDOT. Is it on, in range, and not connected to the phone app?")
+                continue
+            done = asyncio.Event()
+            seen = {"first": True, "wrong": None}
+
+            def on_frame(_sender, data):
+                frame = record_frame(bytes(data))
+                if seen["first"]:
+                    seen["first"] = False
+                    print(f"  first frame: {bytes(data).hex(' ')}")
+                    if frame is None:
+                        print("  That is not the expected 20-byte frame; readings cannot be decoded.")
+                if frame and expected_mac and frame["mac"] != expected_mac:
+                    seen["wrong"] = frame["mac"]
+                    loop.call_soon_threadsafe(done.set)
+
+            set_status("busy", f"Connecting to {device.name or device.address}")
+            async with BleakClient(device, disconnected_callback=lambda _c: loop.call_soon_threadsafe(done.set)) as client:
+                for service in client.services:
+                    print(f"  service {service.uuid}")
+                await client.start_notify(UPDATES_UUID, on_frame)
+                try:
+                    on_frame(None, await client.read_gatt_char(UPDATES_UUID))
+                except Exception:
+                    pass  # not readable; the first notification will arrive shortly
+                set_status("live", f"Connected to {device.name or 'BlueDOT'}")
+                await done.wait()
+            if seen["wrong"]:
+                rejected.add(device.address)
+                print(f"  That BlueDOT is {seen['wrong']}, not {expected_mac}; ignoring it.")
+        except Exception as err:  # Bluetooth off, out of range, permission refused...
+            problem = f"{type(err).__name__}: {err}"
+        mark_gap()
+        if problem:
+            set_status("error", f"Bluetooth problem on the hub ({problem}). Retrying.")
+            await asyncio.sleep(10)
+        else:
+            set_status("busy", "Connection lost, reconnecting")
+            await asyncio.sleep(3)
+
+
+async def demo_loop():
+    start = now_ms() - 40 * 60000
+
+    def frame_at(t):
+        temp = 68 + 140 * (1 - math.exp(-(t - start) / (28 * 60000))) + math.sin(t / 47000) * 0.6
+        return encode_frame(temp, mac="00:a0:50:42:a1:d8")
+
+    for t in range(start, now_ms(), int(state["interval"] * 1000)):
+        record_frame(frame_at(t), t)
+    set_status("live", "Demo: simulated readings")
+    while True:
+        record_frame(frame_at(now_ms()))
+        await asyncio.sleep(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="LocalThermo hub")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--address", help="Bluetooth address of your BlueDOT, e.g. 00:a0:50:42:a1:d8")
+    parser.add_argument("--interval", type=float, default=5, help="seconds between logged readings (default 5)")
+    parser.add_argument("--demo", action="store_true", help="simulated readings, no thermometer needed")
+    parser.add_argument("--browser-bluetooth", action="store_true",
+                        help="let the Chrome/Edge page on this computer do the Bluetooth instead")
     parser.add_argument("--local-only", action="store_true", help="do not accept connections from other devices")
     args = parser.parse_args()
     state["port"] = args.port
+    state["interval"] = max(args.interval, 1)
+    state["demo"] = args.demo
+    expected_mac = normalize_mac(args.address)
+    if args.address and not expected_mac:
+        sys.exit(f"--address should look like 00:a0:50:42:a1:d8, not {args.address!r}")
+
+    job = None
+    if args.demo:
+        job = demo_loop()
+    elif not args.browser_bluetooth:
+        try:
+            import bleak  # noqa: F401
+            job = bluetooth_loop(expected_mac)
+        except ImportError:
+            print("The 'bleak' Bluetooth library is not installed, so this program cannot read the")
+            print("thermometer itself. Install it and start again:\n\n    python3 -m pip install bleak\n")
+            print("Carrying on in --browser-bluetooth mode: use Chrome or Edge on this computer.\n")
+    state["source"] = "server" if job else "browser"
 
     server = Server(("127.0.0.1" if args.local_only else "0.0.0.0", args.port), Handler)
     if sys.platform == "darwin":
@@ -217,13 +413,18 @@ def main():
         except OSError:
             pass
 
-    print(f"On this computer, open in Chrome:  http://localhost:{args.port}")
+    browser = "any browser" if job else "Chrome or Edge"
+    print(f"On this computer, open in {browser}:  http://localhost:{args.port}")
     if not args.local_only:
         lan = lan_address()
-        print(f"On your phone (same network):      http://{lan or '<this computer>'}:{args.port}")
-    print("Press Ctrl+C to stop.")
+        print(f"On your phone (same network):  http://{lan or '<this computer>'}:{args.port}")
+    print("Press Ctrl+C to stop.\n")
     try:
-        server.serve_forever()
+        if job:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            asyncio.run(job)
+        else:
+            server.serve_forever()
     except KeyboardInterrupt:
         print()
 

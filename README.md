@@ -1,8 +1,8 @@
 # LocalThermo
 
-A web page that reads a ThermoWorks BlueDOT thermometer directly over Bluetooth
-(Web Bluetooth), with a live readout, a temperature chart, alerts and CSV logging.
-An optional hub server lets a phone or other device on your network watch along.
+Reads a ThermoWorks BlueDOT thermometer over Bluetooth and shows it in a web page:
+live readout, temperature chart, alerts and CSV logging. One computer near the
+thermometer acts as the hub; a phone or anything else on your network can watch along.
 Nothing leaves your network, and there is no account.
 
 ## Run it
@@ -10,68 +10,71 @@ Nothing leaves your network, and there is no account.
 On the computer that will sit near the thermometer (the hub, for example a Mac):
 
 ```
-python3 server.py        # or: npm start
+python3 -m pip install bleak
+python3 server.py --address 00:a0:50:42:a1:d8
 ```
 
-It prints two addresses:
+`server.py` connects to the BlueDOT itself and prints two addresses:
 
-- `http://localhost:8000`: open this in **Chrome or Edge on the hub**. This page talks
-  to the BlueDOT (Web Bluetooth does not work in Safari or Firefox). Press **Demo** to
-  try it with simulated readings.
-- `http://<hub address>:8000`: open this on **your phone or any other device on the
-  same network**, in any browser including iPhone Safari. It shows the same readout,
-  chart and alerts, fed by the hub.
+- `http://localhost:8000` for the hub computer, in **any browser**
+- `http://<hub address>:8000` for **your phone or any other device on the same
+  network**, also in any browser
 
-How the hub works, and its limits:
+Try it without a thermometer using `python3 server.py --demo`.
 
-- The hub's Chrome page must stay open and connected; it is what reads the BlueDOT.
-  Give it its own window rather than a background tab. On a Mac, `server.py` keeps the
-  computer from idle-sleeping while it runs, but closing a laptop lid still sleeps it.
-- Readings are also saved on the hub as CSV in `logs/`, one file per session.
-- Alerts on a phone are set on that phone and only fire while the page is open with
-  the screen on. Tap the page once (for example **Test alert**) so the phone allows sound.
-- Anyone on your network can view the readings; only the hub itself can send them.
-  Use `python3 server.py --local-only` to turn off access from other devices.
-- macOS may ask whether to allow incoming connections for Python the first time; allow it.
+Things to know:
 
-The folder is plain static files, so it also works without `server.py` on any https
-host (GitHub Pages, say) as a single-device app with no relay.
+- Close the ThermoWorks phone app first: the BlueDOT takes one connection at a time.
+- `--address` is optional. Without it the hub uses the first device named BlueDOT. On
+  macOS, which hides Bluetooth addresses, the hub connects by name and then checks the
+  address the thermometer reports about itself, skipping any BlueDOT that is not yours.
+- macOS asks once to let your terminal app use Bluetooth (System Settings → Privacy &
+  Security → Bluetooth), and may ask whether Python can accept incoming connections.
+  Allow both.
+- The hub must stay awake. On a Mac `server.py` prevents idle sleep while it runs, but
+  closing a laptop lid still sleeps it.
+- Readings are saved on the hub as CSV in `logs/`, one file per session. **New
+  session** (hub computer only) starts a fresh chart and file.
+- Alerts are set per device and only fire while the page is open with the screen on.
+  Tap the page once (for example **Test alert**) so a phone allows sound.
+- Anyone on your network can view the readings; only the hub computer can reset them.
+  `--local-only` turns off access from other devices. `--interval 15` logs less often.
+- The terminal shows connection progress, the services found and the first raw frame,
+  which is what to copy if readings look wrong.
 
-## One-time setup: the service UUID
+## Alternative: Bluetooth in the browser
 
-A browser only lets a page touch Bluetooth services the page names up front, and the
-BlueDOT's service UUID is not documented anywhere I could find. You need to look it up
-once:
+`python3 server.py --browser-bluetooth` needs no `bleak`. Instead the page at
+`http://localhost:8000` does the Bluetooth itself through Web Bluetooth, which means
+Chrome or Edge only on the hub, and that page has to stay open. Other devices still
+watch in any browser. The same page also works with no server at all from any https
+host (GitHub Pages, say) as a single-device app.
 
-1. Close the ThermoWorks app on your phone (the BlueDOT takes one connection at a time).
-2. In Chrome open `chrome://bluetooth-internals/#devices`, press **Start Scan**, find
+This mode needs a one-time setup, because a browser only lets a page touch Bluetooth
+services the page names up front and the BlueDOT's service UUID is not documented
+anywhere I could find:
+
+1. In Chrome open `chrome://bluetooth-internals/#devices`, press **Start Scan**, find
    **BlueDOT** and press **Inspect**.
-3. Copy the text under **Services** and paste it into **Bluetooth setup and
-   diagnostics** at the bottom of the app, then **Save**. The app picks the UUIDs out
-   of whatever you paste.
+2. Copy the text under **Services** and paste it into **Bluetooth setup and
+   diagnostics** at the bottom of the app, then **Save** and **Connect**.
 
-Alternatives: the nRF Connect phone app, or `pip install bleak && python3 tools/discover.py`.
-
-Then press **Connect** and choose the BlueDOT in the browser's prompt. Browsers do not
-allow connecting by MAC address, so the address is used differently: the BlueDOT
-reports its own address in every reading, and the app warns you if it is not the one
-you expect (`00:a0:50:42:a1:d8` by default; change it in setup).
+`python3 tools/discover.py` prints the same UUID.
 
 ## Features
 
 - Live temperature, rate of change, session low/high, and the alarm set on the device
 - Chart with 15 min / 1 hour / all ranges, hover readout, and a table view
-- High and low alerts with sound, an on-page banner and optional desktop notifications,
-  plus a rough time-to-target estimate
-- Logging: readings persist in the browser across reloads; **Download CSV** at any
-  time, or **Log continuously to a file** (desktop Chrome/Edge) to append every 15 s
-- Reconnects automatically if the link drops; keeps the screen awake while connected
+- High and low alerts with sound, an on-page banner and (on the hub computer) optional
+  desktop notifications, plus a rough time-to-target estimate
+- CSV logging on the hub, and **Download CSV** from any device
+- Reconnects automatically if the Bluetooth link drops
 
 The app only reads from the thermometer. It never writes settings to it.
 
 ## Protocol
 
-ThermoWorks does not publish the protocol. `bluedot.js` follows community reverse
+ThermoWorks does not publish the protocol. `server.py` and `bluedot.js` follow community reverse
 engineering, which agrees across three independent projects:
 
 - [jeffsf/pyDE1](https://github.com/jeffsf/pyDE1) `src/pyDE1/thermometer/bluedot.py`
@@ -101,5 +104,5 @@ npm test
 ```
 
 Covers the frame decoder (including a real captured frame from the wnoisephx notes).
-The hub relay was tested with simulated readings. The Bluetooth connection itself has
-not been tested against a physical BlueDOT.
+The hub, viewers and alerts were tested with simulated readings. The Bluetooth
+connection itself has not been tested against a physical BlueDOT in either mode.
