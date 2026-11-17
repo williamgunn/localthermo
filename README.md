@@ -6,18 +6,35 @@ Nothing leaves your computer: there is no server side and no account.
 
 ## Run it
 
-Web Bluetooth needs Chrome or Edge (Windows, macOS, Linux, ChromeOS, Android) and a
-page served from `http://localhost` or `https`. It does not work in Safari, Firefox,
-or any browser on iPhone/iPad.
+On the computer that will sit near the thermometer (the hub, for example a Mac):
 
 ```
-npm start            # same as: python3 -m http.server 8000 --bind 127.0.0.1
+python3 server.py        # or: npm start
 ```
 
-Open <http://localhost:8000>. Press **Demo** to try the page with simulated readings.
+It prints two addresses:
 
-To use it from an Android phone, host the folder somewhere with https (GitHub Pages
-works, since the app is only static files).
+- `http://localhost:8000`: open this in **Chrome or Edge on the hub**. This page talks
+  to the BlueDOT (Web Bluetooth does not work in Safari or Firefox). Press **Demo** to
+  try it with simulated readings.
+- `http://<hub address>:8000`: open this on **your phone or any other device on the
+  same network**, in any browser including iPhone Safari. It shows the same readout,
+  chart and alerts, fed by the hub.
+
+How the hub works, and its limits:
+
+- The hub's Chrome page must stay open and connected; it is what reads the BlueDOT.
+  Give it its own window rather than a background tab. On a Mac, `server.py` keeps the
+  computer from idle-sleeping while it runs, but closing a laptop lid still sleeps it.
+- Readings are also saved on the hub as CSV in `logs/`, one file per session.
+- Alerts on a phone are set on that phone and only fire while the page is open with
+  the screen on. Tap the page once (for example **Test alert**) so the phone allows sound.
+- Anyone on your network can view the readings; only the hub itself can send them.
+  Use `python3 server.py --local-only` to turn off access from other devices.
+- macOS may ask whether to allow incoming connections for Python the first time; allow it.
+
+The folder is plain static files, so it also works without `server.py` on any https
+host (GitHub Pages, say) as a single-device app with no relay.
 
 ## One-time setup: the service UUID
 
@@ -83,4 +100,5 @@ npm test
 ```
 
 Covers the frame decoder (including a real captured frame from the wnoisephx notes).
-The Bluetooth connection itself has not been tested against a physical BlueDOT.
+The hub relay was tested with simulated readings. The Bluetooth connection itself has
+not been tested against a physical BlueDOT.

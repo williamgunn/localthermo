@@ -30,6 +30,7 @@ let lastFrameAt = 0;
 let lastLoggedAt = 0;
 let rangeMin = 0;         // chart window in minutes, 0 = all
 let demo = false;
+let mode = 'standalone';  // 'hub' (this computer relays readings) or 'viewer' (another device watching)
 let device = null;
 let wantConnected = false;
 let retryTimer = null;
@@ -45,7 +46,7 @@ function save(key, value) {
 }
 const saveSettings = () => save(SETTINGS_KEY, settings);
 function saveSession() {
-  if (!demo) save(SESSION_KEY, rows.slice(-20000).map((r) => [r.t, r.v, r.u]));
+  if (!demo && mode !== 'viewer') save(SESSION_KEY, rows.slice(-20000).map((r) => [r.t, r.v, r.u]));
 }
 
 // ---------------------------------------------------------------- units and formatting
@@ -91,6 +92,7 @@ function handleFrame(view, t = Date.now()) {
   }
   checkAlerts(frame);
   scheduleRender();
+  pushToHub();
 }
 
 function addRow(row) {
@@ -109,6 +111,7 @@ function setStatus(state, text) {
   $('status').dataset.state = state;
   $('statusText').textContent = text;
   $('connectBtn').textContent = wantConnected ? 'Disconnect' : 'Connect';
+  pushToHub(true);
 }
 
 function showNotice(text) {
@@ -218,14 +221,70 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && wantConnected) requestWakeLock();
 });
 
-// Flag a silent thermometer (out of range, batteries, powered off).
-setInterval(() => {
-  if ($('status').dataset.state !== 'live' && !demo) return;
-  const quiet = Date.now() - lastFrameAt;
-  if (lastFrameAt && quiet > 20000) {
-    $('tempNote').textContent = `No update for ${fmtSpan(quiet)}; last reading shown`;
+// Redraw periodically so a silent thermometer (out of range, flat batteries) gets flagged.
+setInterval(() => { if (latest) scheduleRender(); }, 5000);
+
+// ---------------------------------------------------------------- hub relay
+// With server.py running, the page on the hub computer pushes readings to it and
+// other devices poll them. Pushes ride on incoming Bluetooth frames, so they keep
+// flowing even when the browser slows this tab's timers in the background.
+
+let hubSent = 0;        // rows the server already has
+let hubReset = true;    // start the server's session over on the next push
+let hubBusy = false;
+let hubPushedAt = 0;
+
+async function pushToHub(force) {
+  if (mode !== 'hub' || hubBusy) return;
+  if (!force && Date.now() - hubPushedAt < 2000) return;
+  hubBusy = true;
+  hubPushedAt = Date.now();
+  const reset = hubReset;
+  const from = reset ? 0 : hubSent;
+  const batch = rows.slice(from, from + 5000);
+  try {
+    const res = await fetch('api/push', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reset, from, demo, latest, lastFrameAt,
+        rows: batch.map((r) => [r.t, r.v, r.u]),
+        status: { state: $('status').dataset.state, text: $('statusText').textContent },
+      }),
+    });
+    const out = await res.json();
+    if (out.resync || !res.ok) hubReset = true;
+    else if (rows[from] === batch[0]) { hubReset = false; hubSent = from + batch.length; }
+    else hubReset = true; // the session changed while this request was in flight
+  } catch { /* server stopped; keep trying */ }
+  hubBusy = false;
+}
+
+let viewSession = '';
+
+async function pollHub() {
+  try {
+    const res = await fetch(`api/state?session=${viewSession}&since=${rows.at(-1)?.t || 0}`, { cache: 'no-store' });
+    const s = await res.json();
+    if (String(s.session) !== viewSession) {
+      viewSession = String(s.session);
+      rows = [];
+      tripped.high = tripped.low = false;
+    }
+    for (const [t, v, u] of s.rows) rows.push({ t, v, u });
+    latest = s.latest;
+    lastFrameAt = s.age == null ? 0 : Date.now() - s.age;
+    if (s.hubAge == null || s.hubAge > 15000) {
+      setStatus('error', 'Hub page is not reporting. Open it in Chrome on the hub computer.');
+    } else {
+      setStatus(s.status.state, s.status.text);
+      if (latest && s.age < 30000) checkAlerts(latest);
+    }
+  } catch {
+    setStatus('error', 'Cannot reach the hub computer');
   }
-}, 5000);
+  scheduleRender();
+}
 
 // ---------------------------------------------------------------- alerts
 
@@ -342,10 +401,15 @@ async function flushFile() {
 setInterval(flushFile, 15000);
 setInterval(saveSession, 30000);
 addEventListener('pagehide', () => { saveSession(); flushFile(); });
+addEventListener('pointerdown', primeAudio, { once: true }); // phones only allow sound after a tap
 
 function renderLogNote() {
   const where = fileHandle ? `Appending to ${fileHandle.name} every 15 seconds. ` : '';
-  $('logNote').textContent = `${where}${rows.length} readings in this session${demo ? ' (demo, not saved)' : ', kept in this browser until you start a new session'}.`;
+  const kept = demo ? ' (demo, not saved)'
+    : mode === 'viewer' ? ', relayed from the hub'
+    : mode === 'hub' ? ', also saved as CSV in the logs folder next to server.py'
+    : ', kept in this browser until you start a new session';
+  $('logNote').textContent = `${where}${rows.length} readings in this session${kept}.`;
 }
 
 // ---------------------------------------------------------------- rendering
@@ -377,8 +441,9 @@ function render() {
     const now = convert(latest.temp, latest.unit, unit);
     $('temp').textContent = now == null ? '--' : now.toFixed(0);
     $('tempUnit').textContent = now == null ? '' : `°${unit}`;
-    $('tempNote').textContent = latest.probeConnected
-      ? `Updated ${fmtClock(lastFrameAt, true)}`
+    const quiet = Date.now() - lastFrameAt;
+    $('tempNote').textContent = quiet > 20000 ? `No update for ${fmtSpan(quiet)}; last reading shown`
+      : latest.probeConnected ? `Updated ${fmtClock(lastFrameAt, true)}`
       : 'No probe detected. Check that the probe is plugged in.';
     const dev = convert(latest.alarmTemp, latest.unit, unit);
     $('devAlarm').textContent = fmtDeg(dev);
@@ -584,6 +649,7 @@ function startDemo() {
   demo = true;
   showNotice('');
   rows = [];
+  hubReset = true;
   latest = null;
   $('demoBtn').textContent = 'Exit demo';
   $('connectBtn').disabled = true;
@@ -633,6 +699,7 @@ $('fileBtn').addEventListener('click', pickLogFile);
 $('clearBtn').addEventListener('click', () => {
   if (rows.length && !confirm('Start a new session? This clears the readings shown here. Download the CSV first if you want to keep them.')) return;
   rows = [];
+  hubReset = true;
   lastLoggedAt = 0;
   fileHandle = null;
   filePending = [];
@@ -678,15 +745,45 @@ $('chart').addEventListener('pointerleave', hideTip);
 document.querySelector('.table-view').addEventListener('toggle', renderTable);
 new ResizeObserver(scheduleRender).observe($('chartWrap'));
 
-// Restore the previous session so a reload mid-cook keeps the chart.
-rows = (load(SESSION_KEY) || []).map(([t, v, u]) => ({ t, v, u }));
-if (rows.length) markGap();
+async function init() {
+  // Is server.py behind this page? If so, are we the hub computer or a device looking in?
+  let hub = null;
+  try {
+    const res = await fetch('api/state?since=9e15', { cache: 'no-store' });
+    if (res.ok) hub = await res.json();
+  } catch { /* plain static hosting: no relay */ }
+  const params = new URLSearchParams(location.search);
+  if (hub) mode = hub.local && !params.has('view') ? 'hub' : 'viewer';
 
-if (!navigator.bluetooth) {
-  showNotice('This browser cannot use Bluetooth from a web page. Use Chrome or Edge on Windows, macOS, Linux, ChromeOS or Android. You can still press Demo to look around.');
-} else if (!settings.services.length) {
-  showNotice('One-time setup: the page needs the BlueDOT service UUID before it can read temperatures. Open "Bluetooth setup and diagnostics" at the bottom of the page.');
+  if (mode === 'viewer') {
+    document.body.classList.add('viewer');
+    $('hubInfo').textContent = 'Showing readings relayed from the hub computer. Alerts set here sound on this device only, and only while this page is open on screen.';
+    $('hubInfo').hidden = false;
+    render();
+    pollHub();
+    setInterval(pollHub, 2000);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') pollHub(); });
+    return;
+  }
+
+  // Restore the previous session so a reload mid-cook keeps the chart.
+  rows = (load(SESSION_KEY) || []).map(([t, v, u]) => ({ t, v, u }));
+  if (rows.length) markGap();
+
+  if (mode === 'hub') {
+    $('hubInfo').textContent = hub.lan
+      ? `Hub mode: on your phone or another device on this network, open http://${hub.lan}:${hub.port}`
+      : 'Hub mode: other devices on this network can open this computer\'s address to watch.';
+    $('hubInfo').hidden = false;
+    setInterval(pushToHub, 3000); // heartbeat, so viewers can tell the hub page is open
+  }
+  if (!navigator.bluetooth) {
+    showNotice('This browser cannot use Bluetooth from a web page. Use Chrome or Edge on Windows, macOS, Linux, ChromeOS or Android. You can still press Demo to look around.');
+  } else if (!settings.services.length) {
+    showNotice('One-time setup: the page needs the BlueDOT service UUID before it can read temperatures. Open "Bluetooth setup and diagnostics" at the bottom of the page.');
+  }
+  renderDiag();
+  render();
+  if (params.has('demo')) startDemo();
 }
-renderDiag();
-render();
-if (new URLSearchParams(location.search).has('demo')) startDemo();
+init();

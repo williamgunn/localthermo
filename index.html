@@ -11,10 +11,12 @@
     <h1>LocalThermo <span class="sub">BlueDOT reader</span></h1>
     <div class="bar-actions">
       <span id="status" class="status" data-state="idle"><span class="dot" aria-hidden="true"></span><span id="statusText">Not connected</span></span>
-      <button id="connectBtn" class="primary">Connect</button>
-      <button id="demoBtn" title="Run with simulated readings, no thermometer needed">Demo</button>
+      <button id="connectBtn" class="primary hub-only">Connect</button>
+      <button id="demoBtn" class="hub-only" title="Run with simulated readings, no thermometer needed">Demo</button>
     </div>
   </header>
+
+  <p id="hubInfo" class="hubinfo" hidden></p>
 
   <div id="banner" class="banner" hidden role="alert">
     <span id="bannerText"></span>
@@ -80,7 +82,7 @@
           <input type="number" id="lowVal" inputmode="decimal" step="1"> <span class="u"></span></label>
         <label class="row"><input type="checkbox" id="soundOn" checked> <span>Play a sound</span></label>
         <div class="row">
-          <button id="notifyBtn">Enable desktop notifications</button>
+          <button id="notifyBtn" class="hub-only">Enable desktop notifications</button>
           <button id="testAlertBtn">Test alert</button>
         </div>
       </section>
@@ -89,18 +91,18 @@
         <h2>Log</h2>
         <label class="row"><span>Display unit</span>
           <select id="unitSel"><option value="auto">Same as thermometer</option><option value="F">°F</option><option value="C">°C</option></select></label>
-        <label class="row"><span>Record a reading every</span>
+        <label class="row hub-only"><span>Record a reading every</span>
           <select id="intervalSel"><option value="1">1 second</option><option value="5">5 seconds</option><option value="15">15 seconds</option><option value="60">1 minute</option></select></label>
         <div class="row">
           <button id="csvBtn">Download CSV</button>
-          <button id="fileBtn" hidden>Log continuously to a file…</button>
-          <button id="clearBtn">New session</button>
+          <button id="fileBtn" class="hub-only" hidden>Log continuously to a file…</button>
+          <button id="clearBtn" class="hub-only">New session</button>
         </div>
         <p class="note" id="logNote"></p>
       </section>
     </div>
 
-    <section class="card">
+    <section class="card hub-only">
       <details id="setup">
         <summary><h2>Bluetooth setup and diagnostics</h2></summary>
         <p>Browsers only let a page use Bluetooth services it names in advance, and the BlueDOT's service UUID is not

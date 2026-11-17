@@ -31,7 +31,7 @@
 }
 
 * { box-sizing: border-box; }
-[hidden] { display: none !important; }
+[hidden], .viewer .hub-only { display: none !important; }
 body {
   margin: 0;
   background: var(--bg);
@@ -132,3 +132,5 @@ label[for] { display: block; margin-top: 10px; font-weight: 600; font-size: 14px
 pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; overflow: auto; max-height: 300px; margin: 6px 0 0; white-space: pre-wrap; word-break: break-all; }
 ol { padding-left: 22px; }
 #macVal { width: 190px; }
+
+.hubinfo { max-width: 948px; margin: 12px auto 0; padding: 0 16px; color: var(--text-2); font-size: 14px; overflow-wrap: anywhere; }
